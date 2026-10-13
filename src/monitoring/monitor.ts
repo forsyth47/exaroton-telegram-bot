@@ -49,6 +49,12 @@ export class Monitor {
     const prevPlayers = this.currentPlayers;
     const currPlayers = new Set(server.players.list || []);
 
+    // --- CRITICAL FIX: Update Internal State IMMEDIATELY ---
+    // This must happen synchronously before any `await` calls to prevent
+    // race conditions where concurrent calls read stale state.
+    this.currentStatus = currStatus;
+    this.currentPlayers = currPlayers;
+
     // --- State Machine & Event Emission ---
     if (prevStatus !== Status.ONLINE && currStatus === Status.ONLINE) {
       await this.emit({ type: 'server_started', serverId: this.serverId, name: server.name, chatId: this.chatId });
@@ -75,17 +81,14 @@ export class Monitor {
       }
     }
 
-    // --- Update Internal State ---
-    this.currentStatus = currStatus;
-    this.currentPlayers = currPlayers;
-
     // --- Hybrid Strategy: Manage Polling vs WS ---
     if (currStatus === Status.OFFLINE || currStatus === Status.CRASHED) {
       this.closeWs();
       this.schedulePolling();
     } else {
       this.clearPolling();
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Check for both OPEN and CONNECTING to prevent connection leaks
+      if (!this.ws || (this.ws.readyState !== WebSocket.OPEN && this.ws.readyState !== WebSocket.CONNECTING)) {
         this.connectWs();
       }
     }
@@ -115,11 +118,16 @@ export class Monitor {
 
   // --- WebSocket (Real-time Events) ---
   private connectWs() {
+    // Guard against multiple simultaneous connection attempts
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return; 
+    }
+
     const url = `wss://api.exaroton.com/v1/servers/${this.serverId}/websocket`;
     this.ws = new WebSocket(url, { headers: { Authorization: `Bearer ${this.tenant.exarotonToken}` } });
 
     this.ws.on('open', () => {
-      console.log(`[Monitor] WS connected for ${this.serverId}`);
+      console.log(`[Monitor] WS connected for ${this.serverId} (Tenant: ${this.tenant.id})`);
       this.retryCount = 0; // Reset backoff
     });
 

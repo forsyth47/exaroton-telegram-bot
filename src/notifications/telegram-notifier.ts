@@ -10,13 +10,13 @@ export class TelegramNotifier implements Notifier {
     
     switch (event.type) {
       case 'server_started':
-        text = `🚀 *Server Started*\n\nServer: \`${event.name}\``;
+        text = `🟢 *Server Started*\n\nServer: \`${event.name}\``;
         break;
       case 'player_joined':
-        text = `🟢 *Player Joined*\n\n\`${event.player}\` joined \`${event.name}\`\nPlayers: ${event.online}/${event.max}`;
+        text = `👋✨ *Player Joined*\n\n\`${event.player}\` joined \`${event.name}\`\nPlayers: ${event.online}/${event.max}`;
         break;
       case 'player_left':
-        text = `🔴 *Player Left*\n\n\`${event.player}\` left \`${event.name}\`\nPlayers: ${event.online}/${event.max}`;
+        text = `🚪🏃 *Player Left*\n\n\`${event.player}\` left \`${event.name}\`\nPlayers: ${event.online}/${event.max}`;
         break;
       case 'server_stopped': {
         const mins = Math.floor(event.durationMs / 60000);

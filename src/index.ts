@@ -1,5 +1,7 @@
 // src/index.ts
 import { config } from "./config.js";
+import fs, { existsSync } from 'node:fs';
+import path from "node:path";
 import { SqliteStorage } from "./storage/sqlite.js";
 import { ExarotonRestClient } from "./exaroton/rest.js";
 import { ExarotonClient } from "./exaroton/client.js";
@@ -11,7 +13,10 @@ import { TelegramNotifier } from "./notifications/telegram-notifier.js";
 
 async function main() {
   console.log("🚀 Exaroton Telegram Bot starting...");
-  
+
+  if (!existsSync(config.databaseUrl)) {
+    fs.mkdirSync(path.dirname(config.databaseUrl), { recursive: true })
+  }
   const storage = new SqliteStorage(config.databaseUrl);
   await storage.init();
   console.log("✅ Database initialized.");
