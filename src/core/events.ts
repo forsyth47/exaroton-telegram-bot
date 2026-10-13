@@ -1,12 +1,19 @@
-// src/core/events.ts
+export interface SessionSummary {
+  durationMs: number;
+  creditsUsed: number;
+  creditsRemaining: number;
+}
+
+type Base = { serverId: string; name: string; chatId: string };
+
 export type MonitorEvent =
-  | { type: 'server_starting'; serverId: string; name: string; chatId: string }
-  | { type: 'server_started'; serverId: string; name: string; chatId: string }
-  | { type: 'player_joined'; serverId: string; name: string; chatId: string; player: string; online: number; max: number }
-  | { type: 'player_left'; serverId: string; name: string; chatId: string; player: string; online: number; max: number }
-  | { type: 'server_stopping'; serverId: string; name: string; chatId: string }
-  | { type: 'server_stopped'; serverId: string; name: string; chatId: string; durationMs: number; creditsUsed: number; creditsRemaining: number }
-  | { type: 'server_crashed'; serverId: string; name: string; chatId: string };
+  | (Base & { type: 'server_starting' })
+  | (Base & { type: 'server_started' })
+  | (Base & { type: 'server_stopping' })
+  | (Base & { type: 'player_joined'; player: string; online: number; max: number })
+  | (Base & { type: 'player_left'; player: string; online: number; max: number })
+  | (Base & { type: 'server_stopped' } & SessionSummary)
+  | (Base & { type: 'server_crashed' } & SessionSummary);
 
 export interface Notifier {
   notify(event: MonitorEvent): Promise<void>;

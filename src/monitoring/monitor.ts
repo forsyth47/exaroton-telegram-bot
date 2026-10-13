@@ -1,219 +1,557 @@
-// src/monitoring/monitor.ts
 import WebSocket from 'ws';
-import { Tenant, ExarotonServer } from '../core/types.js';
+import {
+  ExarotonServer, MonitoringState, ServerSnapshot, ServerStats, Tenant,
+} from '../core/types.js';
 import { ExarotonClient } from '../exaroton/client.js';
 import { Storage } from '../storage/interface.js';
-import { Notifier, MonitorEvent } from '../core/events.js';
+import { MonitorEvent, Notifier } from '../core/events.js';
 import { calculatePlayerDiff } from './player-diff.js';
+import {
+  ServerStatus, evaluateAction, isSessionActive, isStoppedLike, type ServerAction,
+} from './state-machine.js';
 
-enum Status { OFFLINE = 0, ONLINE = 1, STARTING = 2, STOPPING = 3, RESTARTING = 4, CRASHED = 7 }
+const POLL_INTERVAL_MS = 15_000;
+const RESTART_GRACE_MS = 60_000;
+const HEARTBEAT_MS = 30_000;
 
 export class Monitor {
   private ws: WebSocket | null = null;
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private wsReady = false;
+  private statsSubscribed = false;
+  private pongAlive = true;
+
+  private polling: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private refreshTimer: NodeJS.Timeout | null = null;
+
   private retryCount = 0;
-  private currentStatus: number = Status.OFFLINE;
-  private currentPlayers: Set<string> = new Set();
+  private stopped = false;
+  private shuttingDownSession = false;
+  private actionInFlight = false;
+
+  private currentStatus = ServerStatus.OFFLINE;
+  private currentPlayers = new Set<string>();
+  private playerBaselineReady = false;
+
+  private latestServer: ExarotonServer | null = null;
+  private latestStats: ServerStats | null = null;
+  private statsAt: number | null = null;
+  private updatedAt = 0;
+  private transport: ServerSnapshot['transport'] = 'unknown';
+
   private sessionId: string | null = null;
-  private sessionStartedAt: number = 0;
-  private creditsBefore: number = 0;
+  private sessionStartedAt = 0;
+  private creditsBefore = 0;
+  private notifiedStarting = false;
+  private notifiedStarted = false;
+  private restartGraceUntil = 0;
+
+  private destinations: string[];
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private tenant: Tenant,
-    private chatId: string,
+    chatId: string,
     private serverId: string,
     private client: ExarotonClient,
     private storage: Storage,
-    private notifier: Notifier
-  ) {}
+    private notifier: Notifier,
+  ) {
+    this.destinations = [chatId];
+  }
 
-  async start() {
-    console.log(`[Monitor] Starting monitor for ${this.serverId} (Tenant: ${this.tenant.id})`);
-    try {
-      const server = await this.client.getServer(this.serverId);
-      this.handleStatusUpdate(server);
-    } catch (err) {
-      console.error(`[Monitor] Failed to fetch initial state for ${this.serverId}`, err);
-      this.schedulePolling(); // Fallback to polling if REST fails initially
+  /** One physical server may be reported to several groups under the same tenant. */
+  setDestinations(chatIds: string[]): void {
+    this.destinations = [...chatIds];
+  }
+
+  // ───────────────────────── Lifecycle ─────────────────────────
+
+  async start(): Promise<void> {
+    this.stopped = false;
+
+    const persisted = await this.storage.getMonitoringState(this.tenant.id, this.serverId);
+    const openSession = await this.storage.getOpenSession(this.tenant.id, this.serverId);
+
+    if (persisted) {
+      this.currentStatus = persisted.lastStatus;
+      this.currentPlayers = new Set(persisted.lastPlayers);
     }
+
+    if (openSession) {
+      this.sessionId = openSession.id;
+      this.sessionStartedAt = openSession.startedAt;
+      this.creditsBefore = openSession.creditsBefore;
+      // We did not observe this start; do not announce it again.
+      this.notifiedStarting = true;
+      this.notifiedStarted = true;
+    }
+
+    let server: ExarotonServer;
+    try {
+      server = await this.client.getServer(this.serverId);
+    } catch (err) {
+      console.error(`[Monitor:${this.serverId}] Initial REST fetch failed; falling back to polling.`, err);
+      this.schedulePolling();
+      return;
+    }
+
+    this.latestServer = server;
+    this.updatedAt = Date.now();
+
+    if (!persisted) {
+      // First time we ever see this server: adopt silently.
+      this.currentStatus = server.status;
+      this.currentPlayers = new Set(server.players?.list ?? []);
+
+      if (isSessionActive(server.status) && !this.sessionId) {
+        await this.beginSession();
+        this.notifiedStarting = true;
+        this.notifiedStarted = true;
+      } else if (isStoppedLike(server.status) && this.sessionId) {
+        // Session was left open while the bot was down.
+        await this.endSession('stopped');
+      }
+
+      await this.persistState();
+      this.syncTransports();
+      return;
+    }
+
+    // Replay persisted state -> live state (catches up missed stops).
+    await this.applyStatus(server, 'polling');
   }
 
-  stop() {
+  async stop(): Promise<void> {
+    this.stopped = true;
     this.clearPolling();
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    await this.persistState().catch(() => {});
     this.closeWs();
+    // NOTE: we deliberately do NOT end the session here.
+    // The Minecraft server is still running; recovery happens on next boot.
   }
 
-  private async handleStatusUpdate(server: ExarotonServer) {
-    const prevStatus = this.currentStatus;
-    const currStatus = server.status;
-    const prevPlayers = this.currentPlayers;
-    const currPlayers = new Set(server.players.list || []);
+  // ───────────────────── State machine / dedupe ─────────────────────
 
-    // --- CRITICAL FIX: Update Internal State IMMEDIATELY ---
-    // This must happen synchronously before any `await` calls to prevent
-    // race conditions where concurrent calls read stale state.
-    this.currentStatus = currStatus;
+  private applyStatus(server: ExarotonServer, source: 'websocket' | 'polling'): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+
+    // Always keep the freshest snapshot; the queue reads this, not the argument.
+    this.latestServer = server;
+    this.updatedAt = Date.now();
+    this.transport = source;
+
+    this.queue = this.queue
+      .then(() => this.transition())
+      .catch(err => console.error(`[Monitor:${this.serverId}] Transition failed`, err));
+
+    return this.queue;
+  }
+
+  private async transition(): Promise<void> {
+    if (this.stopped) return;
+    const server = this.latestServer;
+    if (!server) return;
+
+    const prev = this.currentStatus;
+    const curr = server.status;
+    const prevPlayers = this.currentPlayers;
+    const currPlayers = new Set(server.players?.list ?? []);
+
+    // Commit synchronously before any await.
+    this.currentStatus = curr;
     this.currentPlayers = currPlayers;
 
-    // --- State Machine & Event Emission ---
-    if (prevStatus !== Status.ONLINE && currStatus === Status.ONLINE) {
-      await this.emit({ type: 'server_started', serverId: this.serverId, name: server.name, chatId: this.chatId });
-      await this.startSession(server.name);
-    }
-    
-    if (prevStatus === Status.ONLINE && currStatus === Status.OFFLINE) {
-      await this.endSession(server.name);
+    if (curr === ServerStatus.RESTARTING && prev !== ServerStatus.RESTARTING) {
+      this.restartGraceUntil = Date.now() + RESTART_GRACE_MS;
     }
 
-    if (currStatus === Status.CRASHED && prevStatus !== Status.CRASHED) {
-      await this.emit({ type: 'server_crashed', serverId: this.serverId, name: server.name, chatId: this.chatId });
-      if (this.sessionId) await this.endSession(server.name);
+    const wasActive = isSessionActive(prev);
+    const isActive = isSessionActive(curr);
+
+    // ── Session begin ──
+    if (isActive && !wasActive) {
+      this.notifiedStarting = false;
+      this.notifiedStarted = false;
+      this.playerBaselineReady = false;
     }
 
-    // Player Diffing (Only relevant when transitioning through online states)
-    if (currStatus === Status.ONLINE || prevStatus === Status.ONLINE) {
-      const { joined, left } = calculatePlayerDiff(prevPlayers, currPlayers);
-      for (const p of joined) {
-        await this.emit({ type: 'player_joined', serverId: this.serverId, name: server.name, chatId: this.chatId, player: p, online: server.players.count, max: server.players.max });
+    if (isActive && !this.sessionId) {
+      await this.beginSession();
+    }
+
+    if (isActive && !this.notifiedStarting && curr !== ServerStatus.ONLINE) {
+      this.notifiedStarting = true;
+      await this.emit({ type: 'server_starting', serverId: this.serverId, name: server.name, chatId: '' });
+    }
+
+    if (curr === ServerStatus.ONLINE && !this.notifiedStarted) {
+      this.notifiedStarted = true;
+      this.notifiedStarting = true;
+      await this.emit({ type: 'server_started', serverId: this.serverId, name: server.name, chatId: '' });
+    }
+
+    // ── Shutdown notification (the missing piece) ──
+    if (curr === ServerStatus.STOPPING && prev !== ServerStatus.STOPPING) {
+      await this.emit({ type: 'server_stopping', serverId: this.serverId, name: server.name, chatId: '' });
+    }
+
+    // ── Player diff: only between two ONLINE snapshots ──
+    // Avoids fake joins during boot/STARTING and a flood of "left" on shutdown.
+    if (curr === ServerStatus.ONLINE) {
+      if (prev === ServerStatus.ONLINE && this.playerBaselineReady) {
+        const { joined, left } = calculatePlayerDiff(prevPlayers, currPlayers);
+        for (const player of joined) {
+          await this.emit({
+            type: 'player_joined', serverId: this.serverId, name: server.name, chatId: '',
+            player, online: server.players?.count ?? 0, max: server.players?.max ?? 0,
+          });
+        }
+        for (const player of left) {
+          await this.emit({
+            type: 'player_left', serverId: this.serverId, name: server.name, chatId: '',
+            player, online: server.players?.count ?? 0, max: server.players?.max ?? 0,
+          });
+        }
       }
-      for (const p of left) {
-        await this.emit({ type: 'player_left', serverId: this.serverId, name: server.name, chatId: this.chatId, player: p, online: server.players.count, max: server.players.max });
-      }
-    }
-
-    // --- Hybrid Strategy: Manage Polling vs WS ---
-    if (currStatus === Status.OFFLINE || currStatus === Status.CRASHED) {
-      this.closeWs();
-      this.schedulePolling();
+      this.playerBaselineReady = true;
     } else {
-      this.clearPolling();
-      // Check for both OPEN and CONNECTING to prevent connection leaks
-      if (!this.ws || (this.ws.readyState !== WebSocket.OPEN && this.ws.readyState !== WebSocket.CONNECTING)) {
-        this.connectWs();
+      this.playerBaselineReady = false;
+    }
+
+    // ── Session end: OFFLINE / CRASHED, with restart grace ──
+    if (isStoppedLike(curr) && this.sessionId && !this.shuttingDownSession) {
+      if (curr === ServerStatus.OFFLINE && Date.now() < this.restartGraceUntil) {
+        // Internal restart: keep the session, stay silent.
+        // Polling remains active and will re-evaluate after the grace window.
+      } else {
+        await this.endSession(curr === ServerStatus.CRASHED ? 'crashed' : 'stopped');
       }
     }
+
+    this.syncTransports();
+    await this.persistState();
   }
 
-  // --- REST Polling (Offline Detection) ---
-  private schedulePolling() {
-    this.clearPolling();
-    this.pollingInterval = setInterval(() => this.poll(), 15000);
+  // ─────────────────────── Session / credits ───────────────────────
+
+  private async readCredits(): Promise<number> {
+    const config = await this.storage.getGroupConfig(this.destinations[0]);
+    if (config?.billing?.type === 'pool') {
+      return (await this.client.getPool(config.billing.poolId)).credits;
+    }
+    return (await this.client.getAccount()).credits;
   }
 
-  private clearPolling() {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+  private async beginSession(): Promise<void> {
+    if (this.sessionId) return;
+    try {
+      this.creditsBefore = await this.readCredits();
+      this.sessionStartedAt = Date.now();
+      this.sessionId = await this.storage.createSession(
+        this.tenant.id, this.destinations[0], this.serverId, this.creditsBefore,
+      );
+      console.log(`[Monitor:${this.serverId}] Session ${this.sessionId} opened (credits=${this.creditsBefore})`);
+    } catch (err) {
+      console.error(`[Monitor:${this.serverId}] Could not open session; will retry.`, err);
     }
   }
 
-  private async poll() {
+  private async endSession(reason: 'stopped' | 'crashed'): Promise<void> {
+    if (!this.sessionId || this.shuttingDownSession) return;
+    this.shuttingDownSession = true;
+
+    const id = this.sessionId;
+    try {
+      const after = await this.readCredits();
+      const durationMs = Date.now() - this.sessionStartedAt;
+      const used = Math.max(0, this.creditsBefore - after);
+
+      await this.storage.closeSession(id, after, used);
+      this.sessionId = null;
+      this.restartGraceUntil = 0;
+
+      const server = this.latestServer;
+      await this.emit({
+        type: reason === 'crashed' ? 'server_crashed' : 'server_stopped',
+        serverId: this.serverId,
+        name: server?.name ?? this.serverId,
+        chatId: '',
+        durationMs,
+        creditsUsed: used,
+        creditsRemaining: after,
+      });
+
+      console.log(`[Monitor:${this.serverId}] Session ${id} closed (used≈${used.toFixed(2)})`);
+    } catch (err) {
+      // Keep the session open so the next poll retries the snapshot.
+      console.error(`[Monitor:${this.serverId}] Could not close session; will retry.`, err);
+    } finally {
+      this.shuttingDownSession = false;
+    }
+  }
+
+  private async persistState(): Promise<void> {
+    const state: MonitoringState = {
+      tenantId: this.tenant.id,
+      serverId: this.serverId,
+      lastStatus: this.currentStatus,
+      lastPlayers: [...this.currentPlayers],
+      lastEventAt: Date.now(),
+    };
+    await this.storage.saveMonitoringState(state);
+  }
+
+  // ───────────────────── Hybrid transports ─────────────────────
+
+  private syncTransports(): void {
+    if (this.stopped) return;
+
+    if (isStoppedLike(this.currentStatus)) {
+      this.closeWs();
+      this.latestStats = null;
+      this.statsAt = null;
+      this.schedulePolling();
+      return;
+    }
+
+    this.ensureWs();
+
+    const healthy =
+      this.ws?.readyState === WebSocket.OPEN && this.wsReady && this.pongAlive;
+
+    // Safety net: keep polling during STARTING / STOPPING / RESTARTING,
+    // and whenever the socket is unhealthy. Only a healthy ONLINE socket
+    // is allowed to disable polling.
+    if (this.currentStatus === ServerStatus.ONLINE && healthy) {
+      this.clearPolling();
+    } else {
+      this.schedulePolling();
+    }
+
+    this.maybeSubscribeStats();
+  }
+
+  private schedulePolling(): void {
+    if (this.polling || this.stopped) return;
+    this.polling = setInterval(() => { void this.poll(); }, POLL_INTERVAL_MS);
+  }
+
+  private clearPolling(): void {
+    if (this.polling) clearInterval(this.polling);
+    this.polling = null;
+  }
+
+  private async poll(): Promise<void> {
+    if (this.stopped) return;
     try {
       const server = await this.client.getServer(this.serverId);
-      this.handleStatusUpdate(server);
+      await this.applyStatus(server, 'polling');
     } catch (err) {
-      console.error(`[Monitor] Polling error for ${this.serverId}`, err);
+      console.error(`[Monitor:${this.serverId}] Poll failed`, err);
     }
   }
 
-  // --- WebSocket (Real-time Events) ---
-  private connectWs() {
-    // Guard against multiple simultaneous connection attempts
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      return; 
-    }
-
-    const url = `wss://api.exaroton.com/v1/servers/${this.serverId}/websocket`;
-    this.ws = new WebSocket(url, { headers: { Authorization: `Bearer ${this.tenant.exarotonToken}` } });
-
-    this.ws.on('open', () => {
-      console.log(`[Monitor] WS connected for ${this.serverId} (Tenant: ${this.tenant.id})`);
-      this.retryCount = 0; // Reset backoff
-    });
-
-    this.ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.stream === 'status' && msg.type === 'status') {
-          this.handleStatusUpdate(msg.data);
-        }
-      } catch (e) { /* Ignore malformed/keep-alive */ }
-    });
-
-    this.ws.on('close', () => this.handleDisconnect());
-    this.ws.on('error', (err) => {
-      console.error(`[Monitor] WS error for ${this.serverId}:`, err.message);
-      this.closeWs();
-    });
+  private ensureWs(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    this.openWs();
   }
 
-  private closeWs() {
-    if (this.ws) {
-      this.ws.removeAllListeners();
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-        this.ws.close();
+  private openWs(): void {
+    if (this.stopped) return;
+
+    const ws = new WebSocket(
+      `wss://api.exaroton.com/v1/servers/${this.serverId}/websocket`,
+      { headers: { Authorization: `Bearer ${this.tenant.exarotonToken}` } },
+    );
+
+    this.ws = ws;
+    this.wsReady = false;
+    this.statsSubscribed = false;
+    this.pongAlive = true;
+
+    ws.on('open', () => {
+      this.retryCount = 0;
+      this.startHeartbeat();
+    });
+
+    ws.on('pong', () => { this.pongAlive = true; });
+
+    ws.on('message', (raw) => {
+      let msg: any;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      // Gate: the API says do not send anything before "ready".
+      if (msg.type === 'ready') {
+        this.wsReady = true;
+        this.maybeSubscribeStats();
+        return;
       }
-      this.ws = null;
+
+      if (msg.type === 'connected') {
+        this.maybeSubscribeStats();
+        return;
+      }
+
+      if (msg.type === 'disconnected') {
+        // NOT a session end. The status stream decides that.
+        this.latestStats = null;
+        this.statsAt = null;
+        this.schedulePolling();
+        return;
+      }
+
+      if (msg.type === 'keep-alive') return;
+
+      if (msg.stream === 'status' && msg.type === 'status' && msg.data) {
+        void this.applyStatus(msg.data as ExarotonServer, 'websocket');
+        return;
+      }
+
+      if (msg.stream === 'stats' && msg.type === 'started') {
+        this.statsSubscribed = true;
+        return;
+      }
+
+      if (msg.stream === 'stats' && msg.type === 'stats' && msg.data?.memory) {
+        this.latestStats = msg.data as ServerStats;
+        this.statsAt = Date.now();
+      }
+    });
+
+    ws.on('close', () => this.handleDisconnect());
+    ws.on('error', (err: Error) => {
+      console.error(`[Monitor:${this.serverId}] WS error: ${err.message}`);
+    });
+  }
+
+  private maybeSubscribeStats(): void {
+    if (!this.wsReady || this.statsSubscribed) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!isSessionActive(this.currentStatus)) return;
+
+    this.ws.send(JSON.stringify({ stream: 'stats', type: 'start' }));
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.pongAlive = true;
+    this.heartbeat = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (!this.pongAlive) {
+        this.ws.terminate(); // force 'close' -> reconnect
+        return;
+      }
+      this.pongAlive = false;
+      this.ws.ping();
+    }, HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  private handleDisconnect(): void {
+    this.stopHeartbeat();
+    this.wsReady = false;
+    this.statsSubscribed = false;
+    this.latestStats = null;
+    this.statsAt = null;
+
+    if (this.stopped) return;
+
+    // Critical: never leave a running server without a safety net.
+    this.schedulePolling();
+
+    if (isStoppedLike(this.currentStatus)) return; // polling is enough
+
+    const delay = Math.min(1000 * 2 ** this.retryCount, 60_000);
+    this.retryCount++;
+    console.log(`[Monitor:${this.serverId}] WS lost; reconnecting in ${delay}ms`);
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.openWs();
+    }, delay);
+  }
+
+  private closeWs(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.stopHeartbeat();
+
+    const ws = this.ws;
+    this.ws = null;
+    this.wsReady = false;
+    this.statsSubscribed = false;
+
+    if (ws) {
+      ws.removeAllListeners();
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+      } catch { /* already gone */ }
     }
   }
 
-  private handleDisconnect() {
-    if (this.currentStatus !== Status.OFFLINE && this.currentStatus !== Status.CRASHED) {
-      // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s, 60s max
-      const delay = Math.min(1000 * Math.pow(2, this.retryCount), 60000);
-      this.retryCount++;
-      console.log(`[Monitor] WS disconnected for ${this.serverId}. Reconnecting in ${delay}ms...`);
-      setTimeout(() => this.connectWs(), delay);
-    }
+  // ───────────────────────── Public API ─────────────────────────
+
+  getSnapshot(): ServerSnapshot {
+    return {
+      server: this.latestServer,
+      stats: this.latestStats,
+      statsAt: this.statsAt,
+      updatedAt: this.updatedAt,
+      transport: this.transport,
+      sessionStartedAt: this.sessionId ? this.sessionStartedAt : null,
+    };
   }
 
-  // --- Session & Credit Tracking ---
-  private async startSession(serverName: string) {
+  async control(action: ServerAction): Promise<{ ok: boolean; message: string }> {
+    if (this.actionInFlight) {
+      return { ok: false, message: 'An action is already in progress. Please wait.' };
+    }
+
+    const status = this.latestServer?.status ?? ServerStatus.OFFLINE;
+    const guard = evaluateAction(status, action);
+    if (!guard.allowed) return { ok: false, message: guard.message! };
+
+    this.actionInFlight = true;
     try {
-      const credits = await this.getCurrentCredits();
-      this.creditsBefore = credits;
-      this.sessionStartedAt = Date.now();
-      this.sessionId = await this.storage.createSession(this.tenant.id, this.chatId, this.serverId, credits);
-    } catch (err) {
-      console.error(`[Monitor] Failed to start session for ${this.serverId}`, err);
-    }
-  }
+      if (action === 'start') await this.client.startServer(this.serverId);
+      if (action === 'stop') await this.client.stopServer(this.serverId);
+      if (action === 'restart') await this.client.restartServer(this.serverId);
 
-  private async endSession(serverName: string) {
-    if (!this.sessionId) return;
-    try {
-      const creditsAfter = await this.getCurrentCredits();
-      const durationMs = Date.now() - this.sessionStartedAt;
-      const creditsUsed = Math.max(0, this.creditsBefore - creditsAfter); // Prevent negative if credits were added
+      // Accelerate feedback instead of waiting for the next 15s poll.
+      if (this.refreshTimer) clearTimeout(this.refreshTimer);
+      this.refreshTimer = setTimeout(() => {
+        this.refreshTimer = null;
+        if (!this.stopped) void this.poll();
+      }, 2000);
 
-      await this.storage.updateSession(this.sessionId, creditsAfter);
-      
-      await this.emit({
-        type: 'server_stopped', serverId: this.serverId, name: serverName, chatId: this.chatId,
-        durationMs, creditsUsed, creditsRemaining: creditsAfter
-      });
+      const message =
+        action === 'start' ? 'Start requested. The server is starting.' :
+        action === 'stop' ? 'Stop requested. The server is shutting down.' :
+        'Restart requested.';
+
+      return { ok: true, message };
     } catch (err) {
-      console.error(`[Monitor] Failed to end session for ${this.serverId}`, err);
+      return { ok: false, message: `Exaroton rejected the request: ${(err as Error).message}` };
     } finally {
-      this.sessionId = null;
+      this.actionInFlight = false;
     }
   }
 
-  private async getCurrentCredits(): Promise<number> {
-    const config = await this.storage.getGroupConfig(this.chatId);
-    if (config?.billing?.type === 'pool') {
-      const pool = await this.client.getPool(config.billing.poolId);
-      return pool.credits;
-    }
-    const account = await this.client.getAccount();
-    return account.credits;
-  }
-
-  private async emit(event: MonitorEvent) {
-    try {
-      await this.notifier.notify(event);
-    } catch (err) {
-      console.error(`[Monitor] Failed to emit event`, err);
+  private async emit(event: MonitorEvent): Promise<void> {
+    for (const chatId of this.destinations) {
+      try {
+        await this.notifier.notify({ ...event, chatId });
+      } catch (err) {
+        console.error(`[Monitor:${this.serverId}] Notification failed for ${chatId}`, err);
+      }
     }
   }
 }
