@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  exaroton-bot:
+    build: .
+    container_name: exaroton-bot
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database across container restarts
+      - bot_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  bot_data:

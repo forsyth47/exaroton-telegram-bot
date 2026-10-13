@@ -1,0 +1,13 @@
+name = "exaroton-telegram-bot"
+main = "src/runtime/cloudflare/index.ts"
+compatibility_date = "2024-05-01"
+
+[vars]
+# Non-secret variables go here
+
+# Secrets (set via `wrangler secret put TELEGRAM_BOT_TOKEN`)
+# DATABASE_URL (D1 binding)
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "exaroton-bot-db"
+# database_id = "your-d1-database-id"
