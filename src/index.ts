@@ -3,8 +3,11 @@ import { config } from "./config.js";
 import { SqliteStorage } from "./storage/sqlite.js";
 import { ExarotonRestClient } from "./exaroton/rest.js";
 import { ExarotonClient } from "./exaroton/client.js";
+import { Tenant } from "./core/types.js";
 import { createBot } from "./telegram/bot.js";
 import { registerSetToken } from "./telegram/commands/set_token.js";
+import { MonitorManager } from "./monitoring/manager.js";
+import { TelegramNotifier } from "./notifications/telegram-notifier.js";
 
 async function main() {
   console.log("🚀 Exaroton Telegram Bot starting...");
@@ -33,7 +36,18 @@ async function main() {
     { command: "pool_credits", description: "Check billing credits" },
   ]);
   
-  console.log("✅ Bot commands registered.");
+  // --- Monitoring Engine Initialization ---
+  const notifier = new TelegramNotifier(bot);
+  const getTenant = async (id: string) => storage.getTenant(id);
+  const manager = new MonitorManager(storage, getClient, getTenant, notifier);
+
+  // Startup Reconciliation (Step 21)
+  await manager.reconcileAll();
+  console.log("✅ Monitors reconciled on startup.");
+
+  // Periodic Reconciliation (Check for new configurations every 60s)
+  setInterval(() => manager.reconcileAll(), 60000);
+
   console.log("🤖 Bot is running... Press Ctrl+C to stop.");
   await bot.start();
 }

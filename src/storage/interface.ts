@@ -7,4 +7,7 @@ export interface Storage {
   saveTenant(tenant: Tenant): Promise<void>;
   getGroupConfig(chatId: string): Promise<GroupConfig | null>;
   saveGroupConfig(config: GroupConfig): Promise<void>;
+  getAllGroupConfigs(): Promise<GroupConfig[]>;
+  createSession(tenantId: string, chatId: string, serverId: string, creditsBefore: number): Promise<string>;
+  updateSession(sessionId: string, creditsAfter: number): Promise<void>;
 }
