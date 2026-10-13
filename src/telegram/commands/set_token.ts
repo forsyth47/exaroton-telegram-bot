@@ -16,7 +16,7 @@ export function registerSetToken(bot: Bot, storage: Storage) {
     try {
       await client.getAccount();
     } catch (e) {
-      await ctx.reply("❌ Invalid Exaroton API token.");
+      await ctx.reply("❌ Invalid Exaroton API token. Please check and try again.");
       return;
     }
 
@@ -33,9 +33,20 @@ export function registerSetToken(bot: Bot, storage: Storage) {
       configuredBy: ctx.from!.id, updatedAt: now
     });
 
-    // Security: Delete the message containing the token
-    try { await ctx.deleteMessage(); } catch (e) {}
+    // --- GRACEFUL DELETION FALLBACK ---
+    try {
+      await ctx.deleteMessage();
+    } catch (e) {
+      // Failed to delete (usually because bot isn't admin or lacks delete rights)
+      await ctx.reply(
+        "⚠️ *Security Warning*\n\nI couldn't delete your message containing the API token. " +
+        "This happens if I am not a group Administrator with 'Delete Messages' permissions.\n\n" +
+        "👉 *Please delete the message with your token manually right now!*",
+        { parse_mode: "Markdown" }
+      );
+      // We continue anyway, the token is saved securely in the DB.
+    }
     
-    await ctx.reply("✅ Token saved and message deleted for security! Use /configure to select your server.");
+    await ctx.reply("✅ Token saved securely! Use /configure to select your server and billing.");
   });
 }
