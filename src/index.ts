@@ -63,7 +63,7 @@ async function main() {
 
   await bot.init();
   
-  console.log(`🤖 Logged in as @${bot.me.username} (id ${bot.me.id})`);
+  console.log(`🤖 Logged in as @${bot.botInfo.username} (id ${bot.botInfo.id})`);
   
   const webhook = await bot.api.getWebhookInfo();
   if (webhook.url) {

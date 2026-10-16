@@ -9,6 +9,7 @@ import { calculatePlayerDiff } from './player-diff.js';
 import {
   ServerStatus, evaluateAction, isSessionActive, isStoppedLike, type ServerAction,
 } from './state-machine.js';
+import { esc, formatDuration } from '../telegram/messages/format.js';
 
 const POLL_INTERVAL_MS = 15_000;
 const RESTART_GRACE_MS = 60_000;
