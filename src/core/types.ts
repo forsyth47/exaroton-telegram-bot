@@ -6,6 +6,7 @@ export interface GroupConfig {
   chatId: string;
   tenantId: string;
   serverId?: string;
+  serverName?: string;
   billing?: BillingSource;
   configuredBy?: number;
   updatedAt: number;

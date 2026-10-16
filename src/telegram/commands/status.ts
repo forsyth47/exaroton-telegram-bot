@@ -99,10 +99,10 @@ export function buildStatusText(
   lines.push(`*Billing:* ${esc(billingLabel)}`);
   lines.push(`*Credits:* ${credits === null ? 'unavailable' : credits.toFixed(2)}`);
 
-  if (snapshot?.updatedAt) {
-    const time = new Date(snapshot.updatedAt).toLocaleTimeString();
-    lines.push('', `_Updated ${time} · via ${snapshot.transport}_`);
-  }
+  // if (snapshot?.updatedAt) {
+  //   const time = new Date(snapshot.updatedAt).toLocaleTimeString();
+  //   lines.push('', `_Updated ${time} · via ${snapshot.transport}_`);
+  // }
 
   return lines.join('\n');
 }

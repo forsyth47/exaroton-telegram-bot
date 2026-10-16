@@ -24,6 +24,7 @@ export class SqliteStorage implements Storage {
         chat_id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL,
         server_id TEXT,
+        server_name TEXT,
         billing_type TEXT,
         pool_id TEXT,
         configured_by INTEGER,
@@ -76,6 +77,7 @@ export class SqliteStorage implements Storage {
       chatId: r.chat_id,
       tenantId: r.tenant_id,
       serverId: r.server_id ?? undefined,
+      serverName: r.server_name ?? undefined,
       billing: r.billing_type === 'pool'
         ? { type: 'pool', poolId: r.pool_id }
         : r.billing_type === 'profile' ? { type: 'profile' } : undefined,
@@ -95,14 +97,15 @@ export class SqliteStorage implements Storage {
 
   async saveGroupConfig(c: GroupConfig): Promise<void> {
     this.db.prepare(`
-      INSERT INTO groups (chat_id, tenant_id, server_id, billing_type, pool_id, configured_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO groups (chat_id, tenant_id, server_id, server_name, billing_type, pool_id, configured_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
         tenant_id = excluded.tenant_id, server_id = excluded.server_id,
+        server_name = excluded.server_name,
         billing_type = excluded.billing_type, pool_id = excluded.pool_id,
         configured_by = excluded.configured_by, updated_at = excluded.updated_at
     `).run(
-      c.chatId, c.tenantId, c.serverId ?? null,
+      c.chatId, c.tenantId, c.serverId ?? null, c.serverName ?? null,
       c.billing?.type ?? null,
       c.billing?.type === 'pool' ? c.billing.poolId : null,
       c.configuredBy ?? null, c.updatedAt,

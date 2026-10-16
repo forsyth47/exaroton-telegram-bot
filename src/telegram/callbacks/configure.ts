@@ -1,4 +1,3 @@
-// src/telegram/callbacks/configure.ts
 import { Bot, InlineKeyboard } from "grammy";
 import { Storage } from "../../storage/interface.js";
 import { ExarotonClient } from "../../exaroton/client.js";
@@ -14,17 +13,22 @@ export function registerConfigureCallbacks(
     const config = await storage.getGroupConfig(chatId);
     if (!config) return;
 
+    const client = await getClient(config.tenantId);
+    
+    // Fetch server details to get the name and save it
+    const server = await client.getServer(serverId);
     config.serverId = serverId;
+    config.serverName = server.name; // <-- Save the name
     config.configuredBy = ctx.from!.id;
     config.updatedAt = Date.now();
     await storage.saveGroupConfig(config);
 
-    const client = await getClient(config.tenantId);
     const pools = await client.getPools();
+    const account = await client.getAccount(); // <-- Fetch account for profile credits
 
     const keyboard = new InlineKeyboard();
     pools.forEach(pool => keyboard.text(`💰 ${pool.name} (${pool.credits} cr)`, `cfg_pool:${pool.id}`).row());
-    keyboard.text("💳 Profile Credits", `cfg_billing:profile`);
+    keyboard.text(`💳 Profile Credits (${account.credits} cr)`, `cfg_billing:profile`);
 
     await ctx.editMessageText(`✅ Server selected!\n\nNow select a billing source:`, { reply_markup: keyboard });
     await ctx.answerCallbackQuery();
@@ -48,7 +52,13 @@ async function saveBilling(ctx: any, storage: Storage, billing: BillingSource) {
   config.updatedAt = Date.now();
   await storage.saveGroupConfig(config);
 
+  // Use serverName if available, fallback to serverId just in case
+  const displayName = config.serverName || config.serverId || "Unknown Server";
   const billingText = billing.type === "pool" ? `Pool (${billing.poolId})` : "Profile Credits";
-  await ctx.editMessageText(`✅ *Configuration Complete!*\n\nServer: ${config.serverId}\nBilling: ${billingText}`, { parse_mode: "Markdown" });
+  
+  await ctx.editMessageText(
+    `✅ *Configuration Complete!*\n\nServer: ${displayName}\nBilling: ${billingText}`, 
+    { parse_mode: "Markdown" }
+  );
   await ctx.answerCallbackQuery();
 }

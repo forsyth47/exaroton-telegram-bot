@@ -26,7 +26,7 @@ async function main() {
   const storage = new SqliteStorage(config.databaseUrl);
     await storage.init();
     console.log("✅ Database initialized.");
-  
+
     const clientCache = new Map<string, ExarotonClient>();
     const getClient = async (tenantId: string): Promise<ExarotonClient> => {
       const cached = clientCache.get(tenantId);
@@ -37,17 +37,17 @@ async function main() {
       clientCache.set(tenantId, client);
       return client;
     };
-  
+
     // 1. Create Bot
     const bot = new Bot(config.telegramBotToken);
     bot.catch((err) => console.error(`Bot error:`, err.error));
-  
+
     // 2. Create Notifier (needs Bot)
     const notifier = new TelegramNotifier(bot);
-  
+
     // 3. Create Manager (needs Storage, Client, Notifier)
     const manager = new MonitorManager(storage, getClient, id => storage.getTenant(id), notifier);
-  
+
     // 4. Register Commands (needs Bot, Storage, Client, Manager)
     registerStart(bot);
     registerHelp(bot);
@@ -57,9 +57,9 @@ async function main() {
     registerPoolCredits(bot, storage, getClient);
     registerStatus(bot, storage, getClient, manager);
     registerControlCallbacks(bot, storage, manager);
-  
+
     await bot.init();
-  
+
     await bot.api.setMyCommands([
       { command: "start", description: "Welcome and setup guide" },
       { command: "help", description: "Show all commands" },
@@ -68,35 +68,50 @@ async function main() {
       { command: "status", description: "Server snapshot + Start/Stop/Restart" },
       { command: "pool_credits", description: "Check billing credits" },
     ]);
-  
+
     // 5. Start Monitoring
     await manager.reconcileAll();
     console.log("✅ Monitors reconciled on startup.");
-  
+
     const reconcileTimer = setInterval(() => { void manager.reconcileAll(); }, 60_000);
-  
+
     const runtime = new PollingTelegramRuntime(bot);
-  
+
     let shuttingDown = false;
     const shutdown = async (signal: string) => {
       if (shuttingDown) return;
       shuttingDown = true;
       console.log(`\n${signal} received, shutting down gracefully...`);
       clearInterval(reconcileTimer);
-      await runtime.stop();
-      await manager.stopAll();
-      storage.close();
-      console.log("✅ State persisted. Goodbye.");
-      process.exit(0);
+
+      // SAFETY NET: If shutdown takes more than 3 seconds, FORCE exit.
+      // This guarantees tsx never gets stuck waiting for a zombie socket.
+      const forceExitTimer = setTimeout(() => {
+        console.error('⚠️ Shutdown took too long. Forcing exit to prevent ghost processes.');
+        process.exit(1);
+      }, 3000);
+
+      try {
+        await runtime.stop();
+        await manager.stopAll();
+        storage.close();
+        console.log('✅ State persisted. Goodbye.');
+      } catch (err) {
+        console.error('Error during shutdown:', err);
+      } finally {
+        clearTimeout(forceExitTimer);
+        // Explicitly exit the process so tsx knows we are done.
+        process.exit(0);
+      }
     };
-  
+
     process.on("SIGINT", () => { void shutdown("SIGINT"); });
     process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
-  
+
     console.log("🤖 Bot is running. Use /status for a snapshot and server controls.");
     await runtime.start();
   }
-  
+
   main().catch((error) => {
     console.error("❌ Fatal error during startup:", error);
     process.exit(1);

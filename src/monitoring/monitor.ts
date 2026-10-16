@@ -124,14 +124,14 @@ export class Monitor {
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
-    this.clearPolling();
-    if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    await this.persistState().catch(() => {});
-    this.closeWs();
-    // NOTE: we deliberately do NOT end the session here.
-    // The Minecraft server is still running; recovery happens on next boot.
-  }
+      this.stopped = true;
+      this.clearPolling();
+      if (this.refreshTimer) clearTimeout(this.refreshTimer);
+      await this.persistState().catch(() => {});
+      
+      // Pass 'true' to force-terminate the WebSocket on shutdown
+      this.closeWs(true); 
+    }
 
   // ───────────────────── State machine / dedupe ─────────────────────
 
@@ -479,7 +479,8 @@ export class Monitor {
     }, delay);
   }
 
-  private closeWs(): void {
+  // Add a 'force' parameter to closeWs
+  private closeWs(force = false): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.stopHeartbeat();
@@ -491,9 +492,14 @@ export class Monitor {
 
     if (ws) {
       ws.removeAllListeners();
-      try {
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
-      } catch { /* already gone */ }
+      if (force) {
+        // INSTANTLY destroy the socket. This frees the Node.js event loop immediately.
+        ws.terminate(); 
+      } else {
+        try {
+          if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+        } catch { /* ignore */ }
+      }
     }
   }
 

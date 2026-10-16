@@ -26,8 +26,7 @@ export function registerConfigure(
 
     const keyboard = new InlineKeyboard();
     servers.forEach(server => {
-      const status = server.status === 1 ? "🟢" : "🔴";
-      keyboard.text(`${status} ${server.name}`, `cfg_server:${server.id}`).row();
+      keyboard.text(`${server.name}`, `cfg_server:${server.id}`).row();
     });
 
     const serverText = config.serverId ? `✅ ${config.serverId}` : "❌ Not selected";
