@@ -15,6 +15,9 @@ export type MonitorEvent =
   | (Base & { type: 'server_stopped' } & SessionSummary)
   | (Base & { type: 'server_crashed' } & SessionSummary);
 
-export interface Notifier {
-  notify(event: MonitorEvent): Promise<void>;
-}
+  export interface Notifier {
+    /** Sends a new message and returns its message_id */
+    notify(event: MonitorEvent): Promise<number | null>;
+    /** Edits an existing message by its message_id */
+    editMessage(chatId: string, messageId: number, text: string): Promise<void>;
+  }

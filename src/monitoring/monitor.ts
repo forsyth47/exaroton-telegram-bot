@@ -50,6 +50,9 @@ export class Monitor {
   private destinations: string[];
   private queue: Promise<void> = Promise.resolve();
 
+  private startingMsgIds = new Map<string, number>();
+  private stoppingMsgIds = new Map<string, number>();
+
   constructor(
     private tenant: Tenant,
     chatId: string,
@@ -189,8 +192,21 @@ export class Monitor {
 
     if (curr === ServerStatus.ONLINE && !this.notifiedStarted) {
       this.notifiedStarted = true;
-      this.notifiedStarting = true;
-      await this.emit({ type: 'server_started', serverId: this.serverId, name: server.name, chatId: '' });
+      this.notifiedStarting = true; // Prevent duplicate starting emissions
+      
+      for (const chatId of this.destinations) {
+        const startingMsgId = this.startingMsgIds.get(chatId);
+        const text = `🚀 *Server started*\n\nServer: ${esc(server.name)}`;
+        
+        if (startingMsgId) {
+          // Edit the existing "starting" message in place
+          await this.notifier.editMessage(chatId, startingMsgId, text);
+          this.startingMsgIds.delete(chatId); // Clean up
+        } else {
+          // Fallback: if we missed the ID (e.g., bot restarted), just send a new one
+          await this.notifier.notify({ type: 'server_started', serverId: this.serverId, name: server.name, chatId });
+        }
+      }
     }
 
     // ── Shutdown notification (the missing piece) ──
@@ -274,19 +290,40 @@ export class Monitor {
       this.restartGraceUntil = 0;
 
       const server = this.latestServer;
-      await this.emit({
-        type: reason === 'crashed' ? 'server_crashed' : 'server_stopped',
-        serverId: this.serverId,
-        name: server?.name ?? this.serverId,
-        chatId: '',
-        durationMs,
-        creditsUsed: used,
-        creditsRemaining: after,
-      });
+      const serverName = server?.name ?? this.serverId;
+
+      // Build the final summary text
+      const text = [
+        reason === 'crashed' ? '💥 *Server crashed*' : '🛑 *Server stopped*',
+        '',
+        `Server: ${esc(serverName)}`,
+        `Session duration: ${formatDuration(durationMs)}`,
+        `Estimated credits used: ${used.toFixed(2)}`,
+        `Remaining credits: ${after.toFixed(2)}`,
+      ].join('\n');
+
+      // Edit the "stopping" message in place for each destination
+      for (const chatId of this.destinations) {
+        const stoppingMsgId = this.stoppingMsgIds.get(chatId);
+        if (stoppingMsgId) {
+          await this.notifier.editMessage(chatId, stoppingMsgId, text);
+          this.stoppingMsgIds.delete(chatId); // Clean up
+        } else {
+          // Fallback: send as a new message if we lost the ID
+          await this.notifier.notify({
+            type: reason === 'crashed' ? 'server_crashed' : 'server_stopped',
+            serverId: this.serverId,
+            name: serverName,
+            chatId,
+            durationMs,
+            creditsUsed: used,
+            creditsRemaining: after,
+          });
+        }
+      }
 
       console.log(`[Monitor:${this.serverId}] Session ${id} closed (used≈${used.toFixed(2)})`);
     } catch (err) {
-      // Keep the session open so the next poll retries the snapshot.
       console.error(`[Monitor:${this.serverId}] Could not close session; will retry.`, err);
     } finally {
       this.shuttingDownSession = false;
@@ -554,7 +591,17 @@ export class Monitor {
   private async emit(event: MonitorEvent): Promise<void> {
     for (const chatId of this.destinations) {
       try {
-        await this.notifier.notify({ ...event, chatId });
+        const msgId = await this.notifier.notify({ ...event, chatId });
+        
+        // If it's a starting/stopping message, save the ID for later editing
+        if (msgId) {
+          if (event.type === 'server_starting') {
+            this.startingMsgIds.set(chatId, msgId);
+          }
+          if (event.type === 'server_stopping') {
+            this.stoppingMsgIds.set(chatId, msgId);
+          }
+        }
       } catch (err) {
         console.error(`[Monitor:${this.serverId}] Notification failed for ${chatId}`, err);
       }
