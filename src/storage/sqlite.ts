@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { Storage } from './interface.js';
 import { GroupConfig, MonitoringState, ServerSession, Tenant } from '../core/types.js';
 
@@ -7,7 +9,14 @@ export class SqliteStorage implements Storage {
   private db: Database.Database;
 
   constructor(dbPath: string) {
-    this.db = new Database(dbPath);
+    if (dbPath !== ':memory:') {
+      const absolute = resolve(dbPath);
+      mkdirSync(dirname(absolute), { recursive: true });
+      this.db = new Database(absolute);
+    } else {
+      this.db = new Database(':memory:');
+    }
+  
     this.db.pragma('journal_mode = WAL');
   }
 
