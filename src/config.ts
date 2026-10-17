@@ -1,5 +1,3 @@
-import 'dotenv/config';
-
 export interface Config {
   telegramBotToken: string;
   adminUserIds: number[];
@@ -11,7 +9,6 @@ function loadConfig(): Config {
   if (!telegramBotToken) {
     throw new Error('TELEGRAM_BOT_TOKEN is required in environment variables');
   }
-
   const adminUserIdsRaw = process.env.ADMIN_USER_IDS || '';
   const adminUserIds = adminUserIdsRaw
     .split(',')

@@ -1,23 +1,24 @@
-import Database from 'better-sqlite3';
-import crypto from 'crypto';
+import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Storage } from './interface.js';
 import { GroupConfig, MonitoringState, ServerSession, Tenant } from '../core/types.js';
+import crypto from 'node:crypto';
 
 export class SqliteStorage implements Storage {
-  private db: Database.Database;
+  private db: Database;
 
   constructor(dbPath: string) {
     if (dbPath !== ':memory:') {
       const absolute = resolve(dbPath);
+      // Bun's Database automatically creates the file, but we ensure the directory exists
       mkdirSync(dirname(absolute), { recursive: true });
-      this.db = new Database(absolute);
+      this.db = new Database(absolute, { create: true });
     } else {
       this.db = new Database(':memory:');
     }
-  
-    this.db.pragma('journal_mode = WAL');
+    
+    this.db.exec('PRAGMA journal_mode = WAL;');
   }
 
   async init(): Promise<void> {
@@ -67,7 +68,9 @@ export class SqliteStorage implements Storage {
     `);
   }
 
-  close(): void { this.db.close(); }
+  close(): void {
+    this.db.close();
+  }
 
   async getTenant(id: string): Promise<Tenant | null> {
     const r = this.db.prepare('SELECT * FROM tenants WHERE id = ?').get(id) as any;
@@ -110,13 +113,11 @@ export class SqliteStorage implements Storage {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
         tenant_id = excluded.tenant_id, server_id = excluded.server_id,
-        server_name = excluded.server_name,
-        billing_type = excluded.billing_type, pool_id = excluded.pool_id,
-        configured_by = excluded.configured_by, updated_at = excluded.updated_at
+        server_name = excluded.server_name, billing_type = excluded.billing_type, 
+        pool_id = excluded.pool_id, configured_by = excluded.configured_by, updated_at = excluded.updated_at
     `).run(
       c.chatId, c.tenantId, c.serverId ?? null, c.serverName ?? null,
-      c.billing?.type ?? null,
-      c.billing?.type === 'pool' ? c.billing.poolId : null,
+      c.billing?.type ?? null, c.billing?.type === 'pool' ? c.billing.poolId : null,
       c.configuredBy ?? null, c.updatedAt,
     );
   }
