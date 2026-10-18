@@ -4,13 +4,18 @@ import { acquireInstanceLock } from './runtime/node/instance-lock.js';
 import { SqliteStorage } from "./storage/sqlite.js";
 import { ExarotonRestClient } from "./exaroton/rest.js";
 import { ExarotonClient } from "./exaroton/client.js";
-import { registerSetToken } from "./telegram/commands/set_token.js";
 import { MonitorManager } from "./monitoring/manager.js";
 import { TelegramNotifier } from "./notifications/telegram-notifier.js";
-import { PollingTelegramRuntime } from "./runtime/node/polling-runtime.js";
 import { Bot } from "grammy";
+import { applySafetyPlugins } from "./telegram/safety.js";
+import { PollingTelegramRuntime } from "./runtime/node/polling-runtime.js";
+import { WebhookTelegramRuntime } from "./runtime/node/webhook-runtime.js";
+import { TelegramRuntime } from "./runtime/telegram-runtime.js";
+
+// Command registrations
 import { registerStart } from "./telegram/commands/start.js";
 import { registerHelp } from "./telegram/commands/help.js";
+import { registerSetToken } from "./telegram/commands/set_token.js";
 import { registerConfigure } from "./telegram/commands/configure.js";
 import { registerConfigureCallbacks } from "./telegram/callbacks/configure.js";
 import { registerPoolCredits } from "./telegram/commands/pool_credits.js";
@@ -20,12 +25,13 @@ import { registerControlCallbacks } from "./telegram/callbacks/control.js";
 async function main() {
   console.log('🚀 Exaroton Telegram Bot starting...');
   
-  // Guard first: a duplicate instance must never reach the Telegram API.
+  // 1. Instance Lock
   const releaseLock = acquireInstanceLock(
     resolve(dirname(config.databaseUrl), 'bot.lock')
   );
   console.log(`🔒 Instance lock acquired (PID ${process.pid})`);
   
+  // 2. Storage & Clients
   const storage = new SqliteStorage(config.databaseUrl);
   await storage.init();
   console.log("✅ Database initialized.");
@@ -41,17 +47,16 @@ async function main() {
     return client;
   };
 
-  // 1. Create Bot
+  // 3. Create Bot & Apply Safety Plugins (Prevents AWS ban loops)
   const bot = new Bot(config.telegramBotToken);
   bot.catch((err) => console.error(`Bot error:`, err.error));
+  applySafetyPlugins(bot); 
 
-  // 2. Create Notifier (needs Bot)
+  // 4. Create Notifier & Manager
   const notifier = new TelegramNotifier(bot);
-
-  // 3. Create Manager (needs Storage, Client, Notifier)
   const manager = new MonitorManager(storage, getClient, id => storage.getTenant(id), notifier);
 
-  // 4. Register Commands (needs Bot, Storage, Client, Manager)
+  // 5. Register Commands & Callbacks
   registerStart(bot);
   registerHelp(bot);
   registerSetToken(bot, storage);
@@ -62,17 +67,9 @@ async function main() {
   registerControlCallbacks(bot, storage, manager);
 
   await bot.init();
-  
   console.log(`🤖 Logged in as @${bot.botInfo.username} (id ${bot.botInfo.id})`);
-  
-  const webhook = await bot.api.getWebhookInfo();
-  if (webhook.url) {
-    throw new Error(
-      `A Telegram webhook is configured (${webhook.url}). ` +
-      `Polling would conflict with it. Remove the webhook before using this runtime.`
-    );
-  }
 
+  // 6. Set Commands (Works perfectly for BOTH Polling and Webhook)
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome and setup guide" },
     { command: "help", description: "Show all commands" },
@@ -82,14 +79,32 @@ async function main() {
     { command: "pool_credits", description: "Check billing credits" },
   ]);
 
-  // 5. Start Monitoring
+  // 7. Choose Transport based on Environment Variable
+  const transportMode = (process.env.TRANSPORT || "polling").toLowerCase();
+  let runtime: TelegramRuntime;
+
+  if (transportMode === "webhook") {
+    const port = parseInt(process.env.WEBHOOK_PORT || "8080", 10);
+    runtime = new WebhookTelegramRuntime(bot, port);
+    console.log(`🌐 Running in WEBHOOK mode on port ${port}.`);
+  } else {
+    // If switching to polling, delete any existing webhook to prevent 409 conflicts
+    const webhookInfo = await bot.api.getWebhookInfo();
+    if (webhookInfo.url) {
+      console.log("⚠️ Webhook is currently set. Deleting it to switch to Polling...");
+      await bot.api.deleteWebhook({ drop_pending_updates: true });
+    }
+    runtime = new PollingTelegramRuntime(bot);
+    console.log("🔄 Running in LONG POLLING mode.");
+  }
+
+  // 8. Start Monitoring
   await manager.reconcileAll();
   console.log("✅ Monitors reconciled on startup.");
 
   const reconcileTimer = setInterval(() => { void manager.reconcileAll(); }, 60_000);
 
-  const runtime = new PollingTelegramRuntime(bot);
-
+  // 9. Graceful Shutdown
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -97,8 +112,6 @@ async function main() {
     console.log(`\n${signal} received, shutting down gracefully...`);
     clearInterval(reconcileTimer);
 
-    // SAFETY NET: If shutdown takes more than 3 seconds, FORCE exit.
-    // This guarantees tsx never gets stuck waiting for a zombie socket.
     const forceExitTimer = setTimeout(() => {
       console.error('⚠️ Shutdown took too long. Forcing exit to prevent ghost processes.');
       process.exit(1);
@@ -108,12 +121,12 @@ async function main() {
       await runtime.stop();
       await manager.stopAll();
       storage.close();
+      releaseLock(); // Release the instance lock
       console.log('✅ State persisted. Goodbye.');
     } catch (err) {
       console.error('Error during shutdown:', err);
     } finally {
       clearTimeout(forceExitTimer);
-      // Explicitly exit the process so tsx knows we are done.
       process.exit(0);
     }
   };
