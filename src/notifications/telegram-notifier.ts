@@ -10,35 +10,33 @@ export class TelegramNotifier implements Notifier {
 
     switch (event.type) {
       case 'server_starting':
-        text = `🟡 *Server starting*\n\nServer: ${esc(event.name)}`;
+        text = `*${esc(event.name)} server is starting...*`;
         break;
       case 'server_started':
-        text = `🚀 *Server started*\n\nServer: ${esc(event.name)}`;
+        text = `*${esc(event.name)}* server is up and running.*`;
         break;
       case 'server_stopping':
-        text = `🟠 *Server stopping*\n\nServer: ${esc(event.name)}\nShutting down…`;
+        text = `*${esc(event.name)}* server is stopping...`;
         break;
       case 'player_joined':
-        text = `🟢 *Player joined*\n\n${esc(event.player)} joined ${esc(event.name)}\nPlayers online: ${event.online}/${event.max}`;
+        text = `🤗 *${esc(event.player)}* joined ${esc(event.name)} (${event.online}/${event.max})`;
         break;
       case 'player_left':
-        text = `🔴 *Player left*\n\n${esc(event.player)} left ${esc(event.name)}\nPlayers online: ${event.online}/${event.max}`;
+        text = `😴 *${esc(event.player)}* left ${esc(event.name)} (${event.online}/${event.max})`;
         break;
       case 'server_stopped':
         text = [
-          '🛑 *Server stopped*',
+          `*💤 ${esc(event.name)}* server stopped.`,
           '',
-          `Server: ${esc(event.name)}`,
-          `Session duration: ${formatDuration(event.durationMs)}`,
-          `Estimated credits used: ${event.creditsUsed.toFixed(2)}`,
-          `Remaining credits: ${event.creditsRemaining.toFixed(2)}`,
+          `Session duration: <code>${formatDuration(event.durationMs)}</code>`,
+          `Estimated credits used: <code>${event.creditsUsed.toFixed(2)}</code>`,
+          `Remaining credits: <code>${event.creditsRemaining.toFixed(2)}</code>`,
         ].join('\n');
         break;
       case 'server_crashed':
         text = [
-          '💥 *Server crashed*',
+          `*${esc(event.name)} Server crashed*`,
           '',
-          `Server: ${esc(event.name)}`,
           `Session duration: ${formatDuration(event.durationMs)}`,
           `Estimated credits used: ${event.creditsUsed.toFixed(2)}`,
           `Remaining credits: ${event.creditsRemaining.toFixed(2)}`,

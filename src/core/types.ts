@@ -10,6 +10,13 @@ export interface GroupConfig {
   billing?: BillingSource;
   configuredBy?: number;
   updatedAt: number;
+  
+  // Notification preferences
+  notifyEnabled?: boolean;
+  notifyStart?: boolean;
+  notifyStop?: boolean;
+  notifyJoin?: boolean;
+  notifyLeave?: boolean;
 }
 
 export interface Tenant {

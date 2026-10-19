@@ -592,9 +592,21 @@ export class Monitor {
   private async emit(event: MonitorEvent): Promise<void> {
     for (const chatId of this.destinations) {
       try {
+        // 1. Fetch config to check notification preferences
+        const config = await this.storage.getGroupConfig(chatId);
+        
+        // 2. Master toggle check
+        if (!config?.notifyEnabled) continue;
+
+        // 3. Specific event toggle checks
+        if ((event.type === 'server_starting' || event.type === 'server_started') && !config.notifyStart) continue;
+        if ((event.type === 'server_stopping' || event.type === 'server_stopped' || event.type === 'server_crashed') && !config.notifyStop) continue;
+        if (event.type === 'player_joined' && !config.notifyJoin) continue;
+        if (event.type === 'player_left' && !config.notifyLeave) continue;
+
+        // 4. If allowed, send the notification
         const msgId = await this.notifier.notify({ ...event, chatId });
         
-        // If it's a starting/stopping message, save the ID for later editing
         if (msgId) {
           if (event.type === 'server_starting') {
             this.startingMsgIds.set(chatId, msgId);

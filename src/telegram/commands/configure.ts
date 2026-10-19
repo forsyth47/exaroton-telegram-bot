@@ -1,4 +1,3 @@
-// src/telegram/commands/configure.ts
 import { Bot, InlineKeyboard } from "grammy";
 import { Storage } from "../../storage/interface.js";
 import { ExarotonClient } from "../../exaroton/client.js";
@@ -16,24 +15,22 @@ export function registerConfigure(
       return;
     }
 
-    const client = await getClient(config.tenantId);
-    const servers = await client.getServers();
+    const serverText = config.serverName ? `✅ ${config.serverName}` : "❌ Not Linked";
+    const billingText = config.billing 
+      ? (config.billing.type === "pool" ? `✅ Pool` : "✅ Profile") 
+      : "❌ Not Linked";
+    const notifyText = config.notifyEnabled ? "🟢 ON" : "🛑 OFF";
 
-    if (servers.length === 0) {
-      await ctx.reply("No servers found for this Exaroton account.");
-      return;
-    }
-
-    const keyboard = new InlineKeyboard();
-    servers.forEach(server => {
-      keyboard.text(`${server.name}`, `cfg_server:${server.id}`).row();
-    });
-
-    const serverText = config.serverId ? `✅ ${config.serverId}` : "❌ Not selected";
-    const billingText = config.billing ? (config.billing.type === "pool" ? `✅ Pool` : "✅ Profile") : "❌ Not selected";
+    const keyboard = new InlineKeyboard()
+      .text("🔗 Link Server & Billing", "cfg_main:link").row()
+      .text(`🔔 Status Ping Settings (${notifyText})`, "cfg_main:ping");
 
     await ctx.reply(
-      `*Exaroton Configuration*\n\nServer: ${serverText}\nBilling: ${billingText}\n\nSelect a server:`,
+      `⚙️ *Exaroton Configuration*\n\n` +
+      `*Server:* ${serverText}\n` +
+      `*Billing:* ${billingText}\n` +
+      `*Notifications:* ${notifyText}\n\n` +
+      `Choose an option below:`,
       { reply_markup: keyboard, parse_mode: "Markdown" }
     );
   });

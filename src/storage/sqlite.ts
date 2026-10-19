@@ -38,6 +38,11 @@ export class SqliteStorage implements Storage {
         billing_type TEXT,
         pool_id TEXT,
         configured_by INTEGER,
+        notify_enabled INTEGER DEFAULT 1,
+        notify_start INTEGER DEFAULT 1,
+        notify_stop INTEGER DEFAULT 1,
+        notify_join INTEGER DEFAULT 1,
+        notify_leave INTEGER DEFAULT 1,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (tenant_id) REFERENCES tenants(id)
       );
@@ -90,11 +95,14 @@ export class SqliteStorage implements Storage {
       tenantId: r.tenant_id,
       serverId: r.server_id ?? undefined,
       serverName: r.server_name ?? undefined,
-      billing: r.billing_type === 'pool'
-        ? { type: 'pool', poolId: r.pool_id }
-        : r.billing_type === 'profile' ? { type: 'profile' } : undefined,
+      billing: r.billing_type === 'pool' ? { type: 'pool', poolId: r.pool_id } : r.billing_type === 'profile' ? { type: 'profile' } : undefined,
       configuredBy: r.configured_by ?? undefined,
       updatedAt: r.updated_at,
+      notifyEnabled: r.notify_enabled === 1,
+      notifyStart: r.notify_start === 1,
+      notifyStop: r.notify_stop === 1,
+      notifyJoin: r.notify_join === 1,
+      notifyLeave: r.notify_leave === 1,
     };
   }
 
@@ -109,16 +117,22 @@ export class SqliteStorage implements Storage {
 
   async saveGroupConfig(c: GroupConfig): Promise<void> {
     this.db.prepare(`
-      INSERT INTO groups (chat_id, tenant_id, server_id, server_name, billing_type, pool_id, configured_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO groups (
+        chat_id, tenant_id, server_id, server_name, billing_type, pool_id, 
+        configured_by, notify_enabled, notify_start, notify_stop, notify_join, notify_leave, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
-        tenant_id = excluded.tenant_id, server_id = excluded.server_id,
-        server_name = excluded.server_name, billing_type = excluded.billing_type, 
-        pool_id = excluded.pool_id, configured_by = excluded.configured_by, updated_at = excluded.updated_at
+        tenant_id = excluded.tenant_id, server_id = excluded.server_id, server_name = excluded.server_name,
+        billing_type = excluded.billing_type, pool_id = excluded.pool_id, configured_by = excluded.configured_by,
+        notify_enabled = excluded.notify_enabled, notify_start = excluded.notify_start, notify_stop = excluded.notify_stop,
+        notify_join = excluded.notify_join, notify_leave = excluded.notify_leave, updated_at = excluded.updated_at
     `).run(
       c.chatId, c.tenantId, c.serverId ?? null, c.serverName ?? null,
       c.billing?.type ?? null, c.billing?.type === 'pool' ? c.billing.poolId : null,
-      c.configuredBy ?? null, c.updatedAt,
+      c.configuredBy ?? null,
+      c.notifyEnabled ? 1 : 0, c.notifyStart ? 1 : 0, c.notifyStop ? 1 : 0,
+      c.notifyJoin ? 1 : 0, c.notifyLeave ? 1 : 0,
+      c.updatedAt
     );
   }
 
