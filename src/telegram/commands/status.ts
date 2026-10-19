@@ -23,7 +23,6 @@ export function registerStatus(
       return;
     }
 
-    // Picks up fresh configuration immediately, without waiting for the timer.
     await manager.reconcileAll();
 
     const client = await getClient(config.tenantId);
@@ -68,41 +67,31 @@ export function buildStatusText(
   const running = isSessionActive(server.status);
   const stats = snapshot?.stats;
 
+  // Safely append software info only if it exists
+  const softwareInfo = server.software 
+    ? ` (${esc(server.software.name)} ${esc(server.software.version)})` 
+    : '';
+
   const lines: string[] = [
-    '📊 *Server Status*',
-    '',
-    `*Server:* ${esc(server.name)}`,
-    `*Address:* \`${esc(server.address)}\``,
-    `*Status:* ${emoji} ${label} (code \`${server.status}\`)`,
+    `🖥️ *${esc(server.name)}${softwareInfo}*`,
+    `🌐 \`${esc(server.address)}\``,
+    `📊 *Status:* ${emoji} ${label}`,
+    `👥 *Players:* ${server.players?.count ?? 0}/${server.players?.max ?? 0}`,
   ];
-
-  if (server.software) {
-    lines.push(`*Software:* ${esc(server.software.name)} ${esc(server.software.version)}`);
-  }
-
-  lines.push(`*Players:* ${server.players?.count ?? 0}/${server.players?.max ?? 0}`);
-  lines.push('');
 
   if (running && stats?.memory) {
     const { usage, percent } = stats.memory;
-    const total = percent > 0 ? formatBytes(usage / (percent / 100)) : null;
-    lines.push(`*Memory:* ${formatBytes(usage)}${total ? ` / ${total}` : ''} (${percent.toFixed(1)}%)`);
+    lines.push(`💾 *Memory:* ${formatBytes(usage)} (${percent.toFixed(1)}%)`);
   } else {
-    lines.push(`*Memory:* ${running ? 'waiting for stats…' : '— (server offline)'}`);
+    lines.push(`💾 *Memory:* ${running ? 'waiting for stats…' : '— (offline)'}`);
   }
 
   if (running && snapshot?.sessionStartedAt) {
-    lines.push(`*Uptime:* ${formatDuration(Date.now() - snapshot.sessionStartedAt)}`);
+    lines.push(`⏱️ *Uptime:* ${formatDuration(Date.now() - snapshot.sessionStartedAt)}`);
   }
 
   lines.push('');
-  lines.push(`*Billing:* ${esc(billingLabel)}`);
-  lines.push(`*Credits:* ${credits === null ? 'unavailable' : credits.toFixed(2)}`);
-
-  // if (snapshot?.updatedAt) {
-  //   const time = new Date(snapshot.updatedAt).toLocaleTimeString();
-  //   lines.push('', `_Updated ${time} · via ${snapshot.transport}_`);
-  // }
+  lines.push(`🪙 *Credits:* ${credits === null ? 'unavailable' : credits.toFixed(2)} (${esc(billingLabel)} pool)`);
 
   return lines.join('\n');
 }

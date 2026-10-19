@@ -179,9 +179,12 @@ async function saveBilling(ctx: any, storage: Storage, billing: BillingSource) {
   const displayName = config.serverName || config.serverId || "Unknown Server";
   const billingText = billing.type === "pool" ? `Pool (${billing.poolId})` : "Profile Credits";
   
+  // Add the Back to Main button
+  const keyboard = new InlineKeyboard().text("⬅️ Back to Main", "cfg_ping:back");
+
   await ctx.editMessageText(
     `✅ *Configuration Complete!*\n\nServer: ${displayName}\nBilling: ${billingText}`, 
-    { parse_mode: "Markdown" }
+    { parse_mode: "Markdown", reply_markup: keyboard } // <-- Added reply_markup here
   );
   await ctx.answerCallbackQuery();
 }

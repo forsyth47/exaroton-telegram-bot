@@ -193,18 +193,17 @@ export class Monitor {
 
     if (curr === ServerStatus.ONLINE && !this.notifiedStarted) {
       this.notifiedStarted = true;
-      this.notifiedStarting = true; // Prevent duplicate starting emissions
+      this.notifiedStarting = true;
       
       for (const chatId of this.destinations) {
         const startingMsgId = this.startingMsgIds.get(chatId);
-        const text = `🚀 *Server started*\n\nServer: ${esc(server.name)}`;
+        // Updated to match your new notifier format (fixed the trailing asterisk typo)
+        const text = `*${esc(server.name)}* server is up and running.`;
         
         if (startingMsgId) {
-          // Edit the existing "starting" message in place
           await this.notifier.editMessage(chatId, startingMsgId, text);
-          this.startingMsgIds.delete(chatId); // Clean up
+          this.startingMsgIds.delete(chatId);
         } else {
-          // Fallback: if we missed the ID (e.g., bot restarted), just send a new one
           await this.notifier.notify({ type: 'server_started', serverId: this.serverId, name: server.name, chatId });
         }
       }
@@ -293,14 +292,13 @@ export class Monitor {
       const server = this.latestServer;
       const serverName = server?.name ?? this.serverId;
 
-      // Build the final summary text
+      // Build the final summary text using escaped backticks (\`)
       const text = [
-        reason === 'crashed' ? '💥 *Server crashed*' : '🛑 *Server stopped*',
+        reason === 'crashed' ? `*${esc(serverName)} Server crashed*` : `*💤 ${esc(serverName)}* server stopped.`,
         '',
-        `Server: ${esc(serverName)}`,
-        `Session duration: ${formatDuration(durationMs)}`,
-        `Estimated credits used: ${used.toFixed(2)}`,
-        `Remaining credits: ${after.toFixed(2)}`,
+        `Session duration: \`${formatDuration(durationMs)}\``,
+        `Estimated credits used: \`${used.toFixed(2)}\``,
+        `Remaining credits: \`${after.toFixed(2)}\``,
       ].join('\n');
 
       // Edit the "stopping" message in place for each destination
@@ -308,9 +306,8 @@ export class Monitor {
         const stoppingMsgId = this.stoppingMsgIds.get(chatId);
         if (stoppingMsgId) {
           await this.notifier.editMessage(chatId, stoppingMsgId, text);
-          this.stoppingMsgIds.delete(chatId); // Clean up
+          this.stoppingMsgIds.delete(chatId);
         } else {
-          // Fallback: send as a new message if we lost the ID
           await this.notifier.notify({
             type: reason === 'crashed' ? 'server_crashed' : 'server_stopped',
             serverId: this.serverId,

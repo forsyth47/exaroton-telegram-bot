@@ -28,18 +28,18 @@ export class TelegramNotifier implements Notifier {
         text = [
           `*💤 ${esc(event.name)}* server stopped.`,
           '',
-          `Session duration: <code>${formatDuration(event.durationMs)}</code>`,
-          `Estimated credits used: <code>${event.creditsUsed.toFixed(2)}</code>`,
-          `Remaining credits: <code>${event.creditsRemaining.toFixed(2)}</code>`,
+          `Session duration: \`${formatDuration(event.durationMs)}\``,
+          `Estimated credits used: \`${event.creditsUsed.toFixed(2)}\``,
+          `Remaining credits: \`${event.creditsRemaining.toFixed(2)}\``,
         ].join('\n');
         break;
       case 'server_crashed':
         text = [
           `*${esc(event.name)} Server crashed*`,
           '',
-          `Session duration: ${formatDuration(event.durationMs)}`,
-          `Estimated credits used: ${event.creditsUsed.toFixed(2)}`,
-          `Remaining credits: ${event.creditsRemaining.toFixed(2)}`,
+          `Session duration: \`${formatDuration(event.durationMs)}\``,
+          `Estimated credits used: \`${event.creditsUsed.toFixed(2)}\``,
+          `Remaining credits: \`${event.creditsRemaining.toFixed(2)}\``,
         ].join('\n');
         break;
       default:
